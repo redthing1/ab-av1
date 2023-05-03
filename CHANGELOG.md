@@ -1,5 +1,36 @@
-# Unreleased
+# v0.7.7
+* Add `--video-only` option for _encode_ & _auto-encode_.
+
+# v0.7.6
+* Fix nested temp directories not being cleaned properly.
+* Temp directories will now start with "." and be created in the working dir instead of the input parent
+  (unless setting --temp-dir).
+
+# v0.7.5
+* Add `-e librav1e` support. Map `--crf` to ffmpeg `-qp` (default max 255), `--preset` to `-speed` (0-10).
+* Disallow `--enc svtav1-params=` usage. libsvtav1 params should instead be set with `--svt`.
+
+# v0.7.4
+* Add `--encoder` support for qsv family of ffmpeg encoders: av1_qsv, hevc_qsv, vp9_qsv, h264_qsv and mpeg2_qsv.
+* Enable lookahead mode by default for encoders: av1_qsv, hevc_qsv, h264_qsv.
+
+# v0.7.3
+* Include all other non-main video streams by copying instead of encoding them with the same
+  settings as the main video stream.
+* Always copy audio unless `--acodec` or `--downmix-to-stereo` are specified. Previously would
+  re-encode to opus when changing container.
+
+# v0.7.2
+* Print failing ffmpeg stderr output.
+* Preserve all input file streams (e.g. audio, subs, attachments) into output.
+* Support concurrent running processes out of the box by segregating temp-dirs & fixing cache access.
+* Improve vmaf accuracy in some cases by forcing 24fps & synchronizing the presentation timestamp.
+* Automatically workaround ffmpeg _"Can't write packet with unknown timestamp"_ sample generation failures
+  (typically encountered with old avi files) by using \`-fflags +genpts\`.
+
+# v0.7.1
 * Fix _crf-search_ incorrectly picking a rate that exceeds the `--max-encoded-percent`.
+* Improve _auto-encode_ crf float display rounding.
 
 # v0.7.0
 * Use ffmpeg for svt-av1 encodes instead of invoking to SvtAv1EncApp directly. This unifies the handling of

@@ -85,25 +85,10 @@ pub struct Encode {
 }
 
 fn parse_svt_arg(arg: &str) -> anyhow::Result<Arc<str>> {
-    let mut arg = arg.to_owned();
-    if !arg.starts_with('-') {
-        if arg.find('=') == Some(1) || arg.len() == 1 {
-            arg.insert(0, '-');
-        } else {
-            arg.insert_str(0, "--");
-        }
-    }
+    let arg = arg.trim_start_matches('-').to_owned();
 
-    for deny in [
-        "-i",
-        "-b",
-        "--crf",
-        "--preset",
-        "--keyint",
-        "--scd",
-        "--input-depth",
-    ] {
-        ensure!(!arg.starts_with(deny), "svt arg {deny} cannot be used here");
+    for deny in ["i", "b", "crf", "preset", "keyint", "scd", "input-depth"] {
+        ensure!(!arg.starts_with(deny), "'{deny}' cannot be used here");
     }
 
     Ok(arg.into())
@@ -114,6 +99,13 @@ fn parse_enc_arg(arg: &str) -> anyhow::Result<String> {
     if !arg.starts_with('-') {
         arg.insert(0, '-');
     }
+
+    ensure!(
+        !arg.starts_with("-svtav1-params"),
+        "'svtav1-params' cannot be set here, use `--svt`"
+    );
+    ensure!(!arg.starts_with("-i"), "'i' cannot be used");
+
     Ok(arg)
 }
 
@@ -166,7 +158,6 @@ impl Encode {
             write!(hint, " --vfilter {filter:?}").unwrap();
         }
         for arg in svt_args {
-            let arg = arg.trim_start_matches('-');
             write!(hint, " --svt {arg}").unwrap();
         }
         for arg in enc_input_args {
@@ -210,11 +201,7 @@ impl Encode {
             };
             svtav1_params.push(format!("scd={scd}"));
             // add all --svt args
-            svtav1_params.extend(
-                self.svt_args
-                    .iter()
-                    .map(|a| a.trim_start_matches('-').to_owned()),
-            );
+            svtav1_params.extend(self.svt_args.iter().map(|a| a.to_string()));
         }
 
         let mut args: Vec<Arc<String>> = self
@@ -247,12 +234,11 @@ impl Encode {
             }
         }
 
-        // add `-b:v 0` for aom & vp9 to use "constant quality" mode
-        if matches!(&*vcodec, "libaom-av1" | "libvpx-vp9")
-            && !args.iter().any(|arg| &**arg == "-b:v")
-        {
-            args.push("-b:v".to_owned().into());
-            args.push("0".to_owned().into());
+        for (name, val) in self.encoder.default_ffmpeg_args() {
+            if !args.iter().any(|arg| &**arg == name) {
+                args.push(name.to_string().into());
+                args.push(val.to_string().into());
+            }
         }
 
         let pix_fmt = self.pix_format.unwrap_or(match &*vcodec {
@@ -280,9 +266,9 @@ impl Encode {
             ("-i", ""),
             ("-y", ""),
             ("-n", ""),
-            ("-c:v", ""),
-            ("-codec:v", ""),
-            ("-vcodec", ""),
+            ("-c:v", " use --encoder"),
+            ("-codec:v", " use --encoder"),
+            ("-vcodec", " use --encoder"),
             ("-pix_fmt", " use --pix-format"),
             ("-crf", ""),
             ("-preset", " use --preset"),
@@ -304,6 +290,7 @@ impl Encode {
             preset,
             output_args: args,
             input_args,
+            video_only: false,
         })
     }
 
@@ -352,8 +339,25 @@ impl Encoder {
     pub fn default_max_crf(&self) -> f32 {
         match self.as_str() {
             "libx264" | "libx265" => 46.0,
+            // rav1e: use max -qp
+            "librav1e" => 255.0,
             // Works well for svt-av1
             _ => 55.0,
+        }
+    }
+
+    /// Additional encoder specific ffmpeg arg defaults.
+    fn default_ffmpeg_args(&self) -> &[(&'static str, &'static str)] {
+        match self.as_str() {
+            // add `-b:v 0` for aom & vp9 to use "constant quality" mode
+            "libaom-av1" | "libvpx-vp9" => &[("-b:v", "0")],
+            // enable lookahead mode for qsv encoders
+            "av1_qsv" | "hevc_qsv" | "h264_qsv" => &[
+                ("-look_ahead", "1"),
+                ("-extbrc", "1"),
+                ("-look_ahead_depth", "40"),
+            ],
+            _ => &[],
         }
     }
 }
@@ -554,6 +558,7 @@ fn svtav1_to_ffmpeg_args_default_over_3m() {
         preset,
         output_args,
         input_args,
+        video_only,
     } = enc
         .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
         .expect("to_ffmpeg_args");
@@ -564,6 +569,7 @@ fn svtav1_to_ffmpeg_args_default_over_3m() {
     assert_eq!(crf, 32.0);
     assert_eq!(preset, Some("8".into()));
     assert_eq!(pix_fmt, PixelFormat::Yuv420p10le);
+    assert!(!video_only);
 
     assert!(
         output_args
@@ -617,6 +623,7 @@ fn svtav1_to_ffmpeg_args_default_under_3m() {
         preset,
         output_args,
         input_args,
+        video_only,
     } = enc
         .to_ffmpeg_args("libsvtav1".into(), 32.0, &probe)
         .expect("to_ffmpeg_args");
@@ -627,6 +634,7 @@ fn svtav1_to_ffmpeg_args_default_under_3m() {
     assert_eq!(crf, 32.0);
     assert_eq!(preset, Some("7".into()));
     assert_eq!(pix_fmt, PixelFormat::Yuv420p);
+    assert!(!video_only);
 
     assert!(
         !output_args.iter().any(|a| a.as_str() == "-g"),

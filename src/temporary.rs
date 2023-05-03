@@ -1,7 +1,12 @@
 //! temp file logic
 use once_cell::sync::Lazy;
+use rand::{
+    distributions::{Alphanumeric, DistString},
+    thread_rng,
+};
 use std::{
     collections::HashMap,
+    env,
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -38,23 +43,56 @@ pub async fn clean(keep_keepables: bool) {
 
 /// Delete all added temporary files.
 pub async fn clean_all() {
-    let files = std::mem::take(&mut *TEMPS.lock().unwrap());
-    for (file, _) in files {
-        let _ = tokio::fs::remove_file(file).await;
+    let mut files: Vec<_> = std::mem::take(&mut *TEMPS.lock().unwrap())
+        .into_keys()
+        .collect();
+    files.sort_by_key(|f| f.is_dir()); // rm dir at the end
+
+    for file in files {
+        match file.is_dir() {
+            true => _ = tokio::fs::remove_dir(file).await,
+            false => _ = tokio::fs::remove_file(file).await,
+        }
     }
 }
 
 async fn clean_non_keepables() {
-    let matching: Vec<_> = TEMPS
+    let mut matching: Vec<_> = TEMPS
         .lock()
         .unwrap()
         .iter()
         .filter(|(_, k)| **k == TempKind::NotKeepable)
         .map(|(f, _)| f.clone())
         .collect();
+    matching.sort_by_key(|f| f.is_dir()); // rm dir at the end
 
     for file in matching {
-        let _ = tokio::fs::remove_file(&file).await;
+        match file.is_dir() {
+            true => _ = tokio::fs::remove_dir(&file).await,
+            false => _ = tokio::fs::remove_file(&file).await,
+        }
         TEMPS.lock().unwrap().remove(&file);
     }
+}
+
+/// Return a temporary directory that is distinct per process/run.
+///
+/// Configured --temp-dir is used as a parent or, if not set, the current working dir.
+pub fn process_dir(conf_parent: Option<PathBuf>) -> PathBuf {
+    static SUBDIR: Lazy<String> = Lazy::new(|| {
+        let mut subdirname = Alphanumeric.sample_string(&mut thread_rng(), 12);
+        subdirname.insert_str(0, ".ab-av1-");
+        subdirname
+    });
+
+    let mut temp_dir =
+        conf_parent.unwrap_or_else(|| env::current_dir().expect("current working directory"));
+    temp_dir.push(&*SUBDIR);
+
+    if !temp_dir.exists() {
+        add(&temp_dir, TempKind::Keepable);
+        std::fs::create_dir_all(&temp_dir).expect("failed to create temp-dir");
+    }
+
+    temp_dir
 }

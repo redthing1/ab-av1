@@ -28,6 +28,7 @@ pub struct FfmpegEncodeArgs<'a> {
     pub preset: Option<Arc<str>>,
     pub output_args: Vec<Arc<String>>,
     pub input_args: Vec<Arc<String>>,
+    pub video_only: bool,
 }
 
 impl FfmpegEncodeArgs<'_> {
@@ -66,20 +67,21 @@ pub fn encode_sample(
         preset,
         output_args,
         input_args,
+        video_only: _,
     }: FfmpegEncodeArgs,
     temp_dir: Option<PathBuf>,
     dest_ext: &str,
 ) -> anyhow::Result<(PathBuf, impl Stream<Item = anyhow::Result<FfmpegOut>>)> {
     let pre = pre_extension_name(&vcodec);
     let crf_str = format!("{}", TerseF32(crf)).replace('.', "_");
-    let mut dest = match &preset {
+    let dest_file_name = match &preset {
         Some(p) => input.with_extension(format!("{pre}.crf{crf_str}.{p}.{dest_ext}")),
         None => input.with_extension(format!("{pre}.crf{crf_str}.{dest_ext}")),
     };
-    if let (Some(mut temp), Some(name)) = (temp_dir, dest.file_name()) {
-        temp.push(name);
-        dest = temp;
-    }
+    let dest_file_name = dest_file_name.file_name().unwrap();
+    let mut dest = temporary::process_dir(temp_dir);
+    dest.push(dest_file_name);
+
     temporary::add(&dest, TempKind::Keepable);
 
     let enc = Command::new("ffmpeg")
@@ -116,6 +118,7 @@ pub fn encode(
         preset,
         output_args,
         input_args,
+        video_only,
     }: FfmpegEncodeArgs,
     output: &Path,
     has_audio: bool,
@@ -129,18 +132,27 @@ pub fn encode(
     let add_cues_to_front =
         matches!(output_ext, Some("mkv") | Some("webm")) && !oargs.contains("-cues_to_front");
 
-    let audio_codec = audio_codec
-        .unwrap_or_else(|| default_audio_codec(input, output, downmix_to_stereo, has_audio));
+    let audio_codec = audio_codec.unwrap_or(if downmix_to_stereo && has_audio {
+        "libopus"
+    } else {
+        "copy"
+    });
 
     let set_ba_128k = audio_codec == "libopus" && !oargs.contains("-b:a");
     let downmix_to_stereo = downmix_to_stereo && !oargs.contains("-ac");
+    let map = match video_only {
+        true => "0:v:0",
+        false => "0",
+    };
 
     let enc = Command::new("ffmpeg")
         .kill_on_drop(true)
         .args(input_args.iter().map(|a| &**a))
         .arg("-y")
         .arg2("-i", input)
-        .arg2("-c:v", &*vcodec)
+        .arg2("-map", map)
+        .arg2("-c:v", "copy")
+        .arg2("-c:v:0", &*vcodec)
         .args(output_args.iter().map(|a| &**a))
         .arg2(vcodec.crf_arg(), crf)
         .arg2("-pix_fmt", pix_fmt.as_str())
@@ -181,34 +193,21 @@ impl VCodecSpecific for Arc<str> {
     fn preset_arg(&self) -> &str {
         match &**self {
             "libaom-av1" | "libvpx-vp9" => "-cpu-used",
+            "librav1e" => "-speed",
             _ => "-preset",
         }
     }
 
     fn crf_arg(&self) -> &str {
-        if self.ends_with("vaapi") {
-            // Use -qp for vaapi codecs as crf is not supported
+        // use crf-like args to support encoders that don't have crf
+        if &**self == "librav1e" || self.ends_with("_vaapi") {
             "-qp"
-        } else if self.ends_with("nvenc") {
-            // Use -cq for nvenc codecs as crf is not supported
+        } else if self.ends_with("_nvenc") {
             "-cq"
+        } else if self.ends_with("_qsv") {
+            "-global_quality"
         } else {
             "-crf"
         }
-    }
-}
-
-pub fn default_audio_codec(
-    input: &Path,
-    output: &Path,
-    downmix_to_stereo: bool,
-    has_audio: bool,
-) -> &'static str {
-    // use `-c:a copy` if the extensions are the same, otherwise re-encode with opus
-    match input.extension() {
-        _ if downmix_to_stereo => "libopus",
-        ext if ext.is_some() && ext == output.extension() => "copy",
-        _ if !has_audio => "copy",
-        _ => "libopus",
     }
 }
